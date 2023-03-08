@@ -78,6 +78,19 @@ int main(void) {
  * 
  */
 void enable_ports(){
+    RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+    RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
+
+    // clear PB 0-10
+    GPIOB->MODER &= ~(GPIO_MODER_MODER0 | GPIO_MODER_MODER1|GPIO_MODER_MODER2|GPIO_MODER_MODER3|GPIO_MODER_MODER4|GPIO_MODER_MODER5|GPIO_MODER_MODER6|GPIO_MODER_MODER7|GPIO_MODER_MODER8|GPIO_MODER_MODER9|GPIO_MODER_MODER10);
+    GPIOB->MODER |= (GPIO_MODER_MODER0_0  | GPIO_MODER_MODER1_0 | GPIO_MODER_MODER2_0 | GPIO_MODER_MODER3_0 |GPIO_MODER_MODER4_0 |GPIO_MODER_MODER5_0|GPIO_MODER_MODER6_0 |GPIO_MODER_MODER7_0 |GPIO_MODER_MODER8_0 | GPIO_MODER_MODER9_0 |GPIO_MODER_MODER10_0 );
+    //clear pc4-8
+    GPIOC->MODER &= ~(GPIO_MODER_MODER4 | GPIO_MODER_MODER5 |GPIO_MODER_MODER6 |GPIO_MODER_MODER7 | GPIO_MODER_MODER8 );
+    //pc4-8 == 01 which is just moder 0
+    GPIOC->MODER |= (GPIO_MODER_MODER4_1 | GPIO_MODER_MODER5_1 | GPIO_MODER_MODER6_1 | GPIO_MODER_MODER7_1 | GPIO_MODER_MODER8_1 );
+    // clear pc0-3 and set it with pull down resistor 10
+    GPIOC -> PUPDR &= ~(GPIO_PUPDR_PUPDR0 | GPIO_PUPDR_PUPDR1 | GPIO_PUPDR_PUPDR2 | GPIO_PUPDR_PUPDR3);
+    GPIOC -> PUPDR |= (GPIO_PUPDR_PUPDR0_1 | GPIO_PUPDR_PUPDR1_1 | GPIO_PUPDR_PUPDR2_1 | GPIO_PUPDR_PUPDR3_1);
 
 }
 
@@ -86,13 +99,30 @@ void enable_ports(){
 //-------------------------------
 // TODO
 
+extern void TIM6_DAC_IRQHandler() {
+    TIM6->SR = 0x00000000;
+    uint16_t c_odr = GPIOC->ODR;
+    if (c_odr & 0x0100) {
+        GPIOC->BRR |= 0x0100;
+    }
+    else {
+        GPIOC->BSRR |= 0x0100;
+    }
+}
+
 
 /**
  * @brief Set up timer 6 as described in handout
  * 
  */
 void setup_tim6() {
+    RCC->APB1ENR |= 0x10;
 
+    TIM6->PSC = 48000 - 1;
+    TIM6->ARR = 500 - 1;
+    TIM6->DIER |= TIM_DIER_UIE;
+    TIM6->CR1 |= TIM_CR1_CEN;
+    NVIC->ISER[0] |= 0x20000;
 }
 
 /**
@@ -103,7 +133,11 @@ void setup_tim6() {
  * @param c 
  */
 void show_char(int n, char c) {
-
+    if ((n < 0) || (n > 7)) {
+        return;
+    }
+    GPIOB->ODR = font[c];
+    GPIOB->ODR |= n << 8;
 }
 
 /**
@@ -114,6 +148,8 @@ void show_char(int n, char c) {
  * @param c 
  */
 void drive_column(int c) {
+    GPIOC->BSRR |= 0xF00000;
+    GPIOC->BSRR |= 0x0010 << (c & 0x03);
 
 }
 
@@ -123,6 +159,7 @@ void drive_column(int c) {
  * @return int 
  */
 int read_rows() {
+    return (GPIOC->IDR & 0x000F);
 
 }
 
@@ -136,7 +173,28 @@ int read_rows() {
  * @return char 
  */
 char rows_to_key(int rows) {
-
+    int idx;
+    int tempcol;
+    tempcol = col & 3;
+    if(rows & 1)
+      {
+        idx = 0;
+      }
+    else if(rows & 2)
+      {
+        idx = 1;
+      }
+    else if(rows & 4)
+      {
+        idx = 2;
+      }
+    else if(rows & 8)
+      {
+        idx = 3;
+      }
+    int x;
+    x = (4*tempcol) + idx;
+   return (keymap_arr[x]);
 }
 
 /**
@@ -145,7 +203,17 @@ char rows_to_key(int rows) {
  * @param key 
  */
 void handle_key(char key) {
-
+    /*
+     *     if key == 'A'/'B'/'D', set mode to key
+     *   else if key is a digit, set thrust to the represented
+     *   value of key, i.e. if key == '1', thrust = 1, not '1'
+     */
+    if ((key == 'A') || (key == 'B') || (key == 'D')) {
+        mode = key;
+    }
+    else if ((key >= '0') && (key <= '9')) {
+        thrust = key - '0';
+    }
 }
 
 //-------------------------------
@@ -153,12 +221,33 @@ void handle_key(char key) {
 //-------------------------------
 // TODO
 
+extern void TIM7_IRQHandler() {
+    TIM7->SR &= ~TIM_SR_UIF;
+    int rows = read_rows();
+    if (rows != 0) {
+        char key = rows_to_key(rows);
+        handle_key(key);
+    }
+    char display = disp[col];
+    show_char(col, display);
+    col++;
+    if (col > 7) {
+        col = 0;
+    }
+    drive_column(col);
+}
+
 /**
  * @brief Setup timer 7 as described in lab handout
  * 
  */
 void setup_tim7() {
-
+    RCC->APB1ENR |= 0x20;
+    TIM7->PSC = 4800 - 1;
+    TIM7->ARR = 10 - 1;
+    TIM7->DIER |= TIM_DIER_UIE;
+    TIM7->CR1 |= TIM_CR1_CEN;
+    NVIC->ISER[0] |= 0x40000;
 }
 
 /**
@@ -166,7 +255,23 @@ void setup_tim7() {
  * 
  */
 void write_display() {
-
+    switch(mode) {
+        case 'C':
+            snprintf(disp, 9, "%s", "Crashed");
+            break;
+        case 'L':
+            snprintf(disp, 9, "%s", "Landed ");
+            break;
+        case 'A':
+            snprintf(disp, 9, "ALt%5d", alt);
+            break;
+        case 'B':
+            snprintf(disp, 9, "FUEL %3d", fuel);
+            break;
+        case 'D':
+            snprintf(disp, 9, "Spd %4d", velo);
+            break;
+    }
 }
 
 /**
@@ -174,13 +279,34 @@ void write_display() {
  * 
  */
 void update_variables() {
+    fuel -= thrust;
+    if (fuel <= 0) {
+        thrust = 0;
+        fuel = 0;
+    }
 
+    alt += velo;
+    if (alt <= 0) {
+        if ((0 - velo) < 10) {
+            mode = 'L';
+        }
+        else {
+            mode = 'C';
+        }
+        return;
+    }
+    velo += (thrust - 5);
 }
 
 //-------------------------------
 // Timer 14 ISR goes here
 //-------------------------------
 // TODO
+extern void TIM14_IRQHandler() {
+    TIM14->SR &= ~TIM_SR_UIF;
+    update_variables();
+    write_display();
+}
 
 /**
  * @brief Setup timer 14 as described in lab
@@ -188,5 +314,10 @@ void update_variables() {
  * 
  */
 void setup_tim14() {
-
+    RCC->APB1ENR |= 0x100;
+    TIM14->PSC = 24000 - 1;
+    TIM14->ARR = 1000 - 1;
+    TIM14->DIER |= TIM_DIER_UIE;
+    TIM14->CR1 |= TIM_CR1_CEN;
+    NVIC->ISER[0] |= 0x80000;
 }
